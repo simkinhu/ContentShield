@@ -1,74 +1,75 @@
-import tensorflow as tf
-import json
+import os
 import numpy as np
+import tensorflow as tf
+from tensorflow.keras.preprocessing.text import tokenizer_from_json
 from tensorflow.keras.preprocessing.sequence import pad_sequences
+import json
 
-# 功能：加载保存的模型
-def load_model(model_path):
-    return tf.keras.models.load_model(model_path)
+class TextSafetyClassifier:
+    def __init__(self, model_path, tokenizer_path, config_path, max_len=100):
+        self.model = self.load_model(model_path)
+        self.tokenizer = self.load_tokenizer(tokenizer_path)
+        self.config = self.load_config(config_path)
+        self.max_len = max_len
+        self.label_dict = self.create_label_dict()
 
-# 功能：加载 Tokenizer
-def load_tokenizer(tokenizer_path):
-    with open(tokenizer_path, 'r', encoding='utf-8') as f:
-        tokenizer_json_string = f.read()  # 直接读取文件内容为字符串
-    tokenizer = tf.keras.preprocessing.text.tokenizer_from_json(tokenizer_json_string)
-    return tokenizer
+    @staticmethod
+    def load_model(model_path):
+        return tf.keras.models.load_model(model_path)
 
+    @staticmethod
+    def load_tokenizer(tokenizer_path):
+        with open(tokenizer_path, 'r', encoding='utf-8') as f:
+            return tokenizer_from_json(f.read())
 
-# 功能：处理新的文本数据
-def prepare_text(texts, tokenizer, max_len=20):
-    sequences = tokenizer.texts_to_sequences(texts)
-    padded_sequences = pad_sequences(sequences, maxlen=max_len, padding='post', truncating='post')
-    return padded_sequences
+    @staticmethod
+    def load_config(config_path):
+        with open(config_path, 'r') as f:
+            return json.load(f)
 
-# 功能：进行预测
-def predict(model, processed_data):
-    predictions = model.predict(processed_data)
-    predicted_class_indices = np.argmax(predictions, axis=1)
-    predicted_labels = [label_dict[index] for index in predicted_class_indices]
-    return predicted_labels
+    def create_label_dict(self):
+        # 定义实际的类别名称
+        categories = [
+            "政治敏感", "违禁违规", "暴力极端", "色情内容",
+            "侮辱性语言", "恐怖内容", "儿童不宜", "欺诈行为",
+            "非法交易", "网络暴力", "自我伤害", "仇恨歧视",
+            "不实信息", "性骚扰", "恶意推广", "其它"
+        ]
+        return {i: category for i, category in enumerate(categories)}
+
+    def preprocess_text(self, text):
+        sequences = self.tokenizer.texts_to_sequences([text])
+        padded_sequences = pad_sequences(sequences, maxlen=self.max_len, padding='post', truncating='post')
+        return padded_sequences
+
+    def classify_text(self, text):
+        preprocessed_text = self.preprocess_text(text)
+        prediction = self.model.predict(preprocessed_text)
+        predicted_class = np.argmax(prediction, axis=1)[0]
+        confidence = prediction[0][predicted_class]
+        return self.label_dict[predicted_class], confidence
+
+def main():
+    # 设置路径
+    base_dir = 'train'
+    model_dir = 'model_resumable'
+    model_path = os.path.join(base_dir, model_dir, 'final_model.keras')
+    tokenizer_path = os.path.join('preprocess', '20240815', 'tokenizer.json')
+    config_path = os.path.join(base_dir, model_dir, 'config.json')
+
+    # 初始化分类器
+    classifier = TextSafetyClassifier(model_path, tokenizer_path, config_path)
+
+    # 测试循环
+    while True:
+        text = input("请输入要审核的文本（输入'quit'退出）: ")
+        if text.lower() == 'quit':
+            break
+
+        category, confidence = classifier.classify_text(text)
+        print(f"分类结果: {category}")
+        print(f"置信度: {confidence:.2f}")
+        print("-" * 50)
 
 if __name__ == "__main__":
-    date = '20240420'  # 设置日期
-    train_dir = 'train'
-    preprocess_dir = 'preprocess'
-
-    model_path = f'{train_dir}/{date}/model.h5'
-    tokenizer_path = f'{preprocess_dir}/{date}/tokenizer.json'
-
-    # 定义标签映射直接在代码中
-    label_dict = {
-        0: "政治敏感",
-        1: "违禁违规",
-        2: "暴力极端",
-        3: "色情内容",
-        4: "侮辱性语言",
-        5: "恐怖内容",
-        6: "儿童不宜",
-        7: "欺诈行为",
-        8: "非法交易",
-        9: "网络暴力",
-        10: "自我伤害",
-        11: "仇恨歧视",
-        12: "不实信息",
-        13: "性骚扰",
-        14: "恶意推广",
-        15: "其它"
-    }
-
-    # 加载模型和 Tokenizer
-    model = load_model(model_path)
-    tokenizer = load_tokenizer(tokenizer_path)
-
-    # 测试文本数据
-    test_texts = ["我国拟规定任何单位个人不得私自开拆他人邮件中新社北京四月二十二日", "我要回家吃饭", "你在哪里？", "哈哈哈哈"]
-
-    # 准备数据
-    processed_data = prepare_text(test_texts, tokenizer)
-
-    # 进行预测
-    predictions = predict(model, processed_data)
-
-    # 打印预测结果
-    for text, label in zip(test_texts, predictions):
-        print(f"Text: {text}\nPredicted Label: {label}\n")
+    main()
