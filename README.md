@@ -2,7 +2,7 @@
 
 基于Tensorflow的文本内容安全审核
 
-使用GPT4 + CLude一步一步引导写了使用Tensorflow来训练一个文本内容审核的模型代码；
+使用GPT4 + claude3.5 sonnet一步一步引导写了使用Tensorflow来训练一个文本内容审核的模型代码；
 
 模型训练需要大量的数据集去训练，在data下下载了部分数据,但是数据完全不够；
 
