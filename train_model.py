@@ -1,25 +1,23 @@
 import os
 import numpy as np
 import tensorflow as tf
-from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Embedding, GlobalAveragePooling1D, Dense, Dropout, LSTM
+from transformers import TFAutoModel, AutoTokenizer, TFAutoModelForSequenceClassification
+from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, TensorBoard, ReduceLROnPlateau
-from tensorflow.keras.preprocessing.text import tokenizer_from_json
-import json
-from datetime import datetime
+from tensorflow.keras.losses import SparseCategoricalCrossentropy
+from tensorflow.keras.callbacks import ModelCheckpoint, EarlyStopping, ReduceLROnPlateau
+from sklearn.utils.class_weight import compute_class_weight
 
-class TextSafetyTrainer:
+
+class TextSafetyClassifier:
     def __init__(self, config):
         self.config = config
         self.setup_gpu()
         self.load_data()
         self.load_tokenizer()
-        self.load_or_build_model()
+        self.build_model()
 
     def setup_gpu(self):
-        print(f"TensorFlow版本: {tf.__version__}")
-        print(f"CUDA是否可用: {tf.test.is_built_with_cuda()}")
         gpus = tf.config.list_physical_devices('GPU')
         if gpus:
             try:
@@ -27,128 +25,163 @@ class TextSafetyTrainer:
                     tf.config.experimental.set_memory_growth(gpu, True)
                 tf.config.set_visible_devices(gpus[0], 'GPU')
                 print(f"使用GPU进行训练: {gpus[0]}")
-                print(f"GPU内存: {tf.config.experimental.get_memory_info('GPU:0')['current'] / (1024 * 1024)} MB")
             except RuntimeError as e:
                 print(f"GPU设置错误: {e}")
         else:
             print("未检测到GPU，使用CPU进行训练")
 
     def load_data(self):
-        self.X_train = np.load(os.path.join(self.config['data_dir'], 'X_train.npy'))
+        self.X_train = np.load(os.path.join(self.config['data_dir'], 'X_train.npy'), allow_pickle=True)
         self.y_train = np.load(os.path.join(self.config['data_dir'], 'y_train.npy'))
-        self.X_test = np.load(os.path.join(self.config['data_dir'], 'X_test.npy'))
-        self.y_test = np.load(os.path.join(self.config['data_dir'], 'y_test.npy'))
-        print(f"数据加载完成。训练集大小: {self.X_train.shape[0]}, 测试集大小: {self.X_test.shape[0]}")
+
+        # 确保 X_train 是字符串列表
+        if isinstance(self.X_train[0], np.ndarray):
+            self.X_train = [' '.join(map(str, x)) for x in self.X_train]
+        elif not isinstance(self.X_train[0], str):
+            raise ValueError("X_train 中的元素既不是字符串也不是数组")
+
+        print(f"训练数据加载完成。训练集大小: {len(self.X_train)}")
+        print(f"X_train 的第一个元素类型: {type(self.X_train[0])}")
+        print(f"X_train 的第一个元素: {self.X_train[0][:100]}...")  # 打印前100个字符
+        self.analyze_data_distribution()
+
+    def analyze_data_distribution(self):
+        all_classes = np.array(range(self.config['num_classes']))
+        unique, counts = np.unique(self.y_train, return_counts=True)
+
+        print("训练数据分布:")
+        for label in all_classes:
+            count = counts[unique == label][0] if label in unique else 0
+            print(f"类别 {label}: {count} 样本")
+
+        present_classes = np.unique(self.y_train)
+        class_weights = compute_class_weight('balanced', classes=present_classes, y=self.y_train)
+        self.class_weight_dict = dict(zip(present_classes, class_weights))
+
+        for label in all_classes:
+            if label not in self.class_weight_dict:
+                self.class_weight_dict[label] = 1.0
+
+        print("类别权重:", self.class_weight_dict)
 
     def load_tokenizer(self):
-        with open(os.path.join(self.config['data_dir'], 'tokenizer.json'), 'r', encoding='utf-8') as f:
-            self.tokenizer = tokenizer_from_json(f.read())
-        print("Tokenizer加载完成")
-
-    def load_or_build_model(self):
-        checkpoint_path = os.path.join(self.config['model_dir'], 'checkpoint.keras')
-        if os.path.exists(checkpoint_path):
-            print("找到已有的模型检查点，正在加载...")
-            self.model = load_model(checkpoint_path)
-            print("模型加载完成")
-        else:
-            print("未找到模型检查点，正在构建新模型...")
-            self.build_model()
+        tokenizer_path = self.config['basic_model_dir']
+        print(f"尝试加载tokenizer的完整路径: {tokenizer_path}")
+        if not os.path.exists(os.path.join(tokenizer_path, 'vocab.txt')):
+            raise ValueError(f"Tokenizer vocab.txt not found at {tokenizer_path}")
+        self.tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+        print("Tokenizer从本地加载完成")
 
     def build_model(self):
-        vocab_size = len(self.tokenizer.word_index) + 1
-        self.model = Sequential([
-            Embedding(vocab_size, self.config['embedding_dim'], input_length=self.config['max_length']),
-            LSTM(128, return_sequences=True),
-            GlobalAveragePooling1D(),
-            Dense(256, activation='relu'),
-            Dropout(0.5),
-            Dense(128, activation='relu'),
-            Dropout(0.3),
-            Dense(self.config['num_classes'], activation='softmax')
-        ])
+        model_path = self.config['basic_model_dir']
+        print(f"尝试加载模型的完整路径: {model_path}")
+        if not os.path.exists(os.path.join(model_path, 'tf_model.h5')):
+            raise ValueError(f"Model tf_model.h5 not found at {model_path}")
+
+        base_model = TFAutoModelForSequenceClassification.from_pretrained(
+            model_path,
+            num_labels=self.config['num_classes'],
+            from_pt=True
+        )
+        print("基础模型从本地加载完成")
+
+        input_ids = tf.keras.layers.Input(shape=(self.config['max_length'],), dtype=tf.int32, name="input_ids")
+        attention_mask = tf.keras.layers.Input(shape=(self.config['max_length'],), dtype=tf.int32,
+                                               name="attention_mask")
+
+        outputs = base_model(input_ids, attention_mask=attention_mask)[0]
+        outputs = Dropout(0.1)(outputs)
+        outputs = Dense(self.config['num_classes'], activation='softmax')(outputs)
+
+        self.model = tf.keras.Model(inputs=[input_ids, attention_mask], outputs=outputs)
+
         self.model.compile(
-            loss='sparse_categorical_crossentropy',
             optimizer=Adam(learning_rate=self.config['learning_rate']),
+            loss=SparseCategoricalCrossentropy(from_logits=False),
             metrics=['accuracy']
         )
         print(self.model.summary())
 
+    def preprocess_data(self, texts):
+        # 添加类型检查和转换
+        if not isinstance(texts, list):
+            raise ValueError("texts must be a list of strings")
+        if not all(isinstance(text, str) for text in texts):
+            raise ValueError("All elements in texts must be strings")
+
+        return self.tokenizer(
+            texts,
+            padding='max_length',
+            truncation=True,
+            max_length=self.config['max_length'],
+            return_tensors='tf'
+        )
+
     def train(self):
-        checkpoint_path = os.path.join(self.config['model_dir'], 'checkpoint.keras')
+        preprocessed_data = self.preprocess_data(self.X_train)
+
+        epochs_dir = os.path.join(self.config['model_dir'], 'epochs')
+        if not os.path.exists(epochs_dir):
+            os.makedirs(epochs_dir)
+
+        # 检查是否存在之前的checkpoint
+        checkpoints = [f for f in os.listdir(epochs_dir) if f.endswith('.h5')]
+        if checkpoints:
+            latest_checkpoint = max(checkpoints, key=lambda x: int(x.split('-')[1].split('.')[0]))
+            checkpoint_path = os.path.join(epochs_dir, latest_checkpoint)
+            initial_epoch = int(latest_checkpoint.split('-')[1].split('.')[0])
+            print(f"找到之前的checkpoint: {checkpoint_path}")
+            self.model.load_weights(checkpoint_path)
+            print(f"从epoch {initial_epoch} 继续训练")
+        else:
+            initial_epoch = 0
+            print("未找到之前的checkpoint，从头开始训练")
+
+        checkpoint_path = os.path.join(epochs_dir, 'epoch-{epoch:02d}.h5')
         callbacks = [
-            ModelCheckpoint(
-                filepath=checkpoint_path,
-                save_best_only=True,
-                monitor='val_accuracy',
-                save_weights_only=False
-            ),
-            EarlyStopping(
-                monitor='val_loss',
-                patience=10,
-                restore_best_weights=True
-            ),
-            ReduceLROnPlateau(
-                monitor='val_loss',
-                factor=0.2,
-                patience=5,
-                min_lr=0.0001
-            ),
-            TensorBoard(log_dir=os.path.join(self.config['model_dir'], 'logs'))
+            ModelCheckpoint(filepath=checkpoint_path, save_weights_only=True, save_best_only=False, save_freq='epoch'),
+            EarlyStopping(monitor='loss', patience=3, restore_best_weights=True),
+            ReduceLROnPlateau(monitor='loss', factor=0.2, patience=2, min_lr=0.00001)
         ]
 
-        # 获取初始epoch
-        initial_epoch = 0
-        if os.path.exists(checkpoint_path):
-            training_state_path = os.path.join(self.config['model_dir'], 'training_state.json')
-            if os.path.exists(training_state_path):
-                with open(training_state_path, 'r') as f:
-                    training_state = json.load(f)
-                    initial_epoch = training_state['epoch']
-
         history = self.model.fit(
-            self.X_train, self.y_train,
+            {
+                'input_ids': preprocessed_data['input_ids'],
+                'attention_mask': preprocessed_data['attention_mask']
+            },
+            self.y_train,
             epochs=self.config['epochs'],
             initial_epoch=initial_epoch,
             batch_size=self.config['batch_size'],
-            validation_data=(self.X_test, self.y_test),
             callbacks=callbacks,
+            class_weight=self.class_weight_dict,
             verbose=1
         )
 
-        # 保存训练状态
-        with open(os.path.join(self.config['model_dir'], 'training_state.json'), 'w') as f:
-            json.dump({'epoch': self.config['epochs']}, f)
-
-        self.model.save(os.path.join(self.config['model_dir'], 'final_model.keras'))
-        print(f"训练完成。最终模型保存在: {os.path.join(self.config['model_dir'], 'final_model.keras')}")
-
-        test_loss, test_accuracy = self.model.evaluate(self.X_test, self.y_test, verbose=0)
-        print(f"测试集准确率: {test_accuracy:.4f}")
-        print(f"测试集损失: {test_loss:.4f}")
+        self.model.save(os.path.join(self.config['model_dir'], 'final_model.h5'))
+        print(f"训练完成。最终模型保存在: {os.path.join(self.config['model_dir'], 'final_model.h5')}")
 
         return history
+
 
 def main():
     config = {
         'data_dir': 'preprocess/20240815',
-        'model_dir': os.path.join('train', 'model_resumable'),
-        'embedding_dim': 200,
-        'max_length': 100,
+        'model_dir': os.path.join('train', 'model_transformer'),
+        'basic_model_dir': 'bert-base-chinese',
+        'max_length': 128,
         'num_classes': 16,
-        'learning_rate': 0.001,
+        'learning_rate': 2e-5,
         'epochs': 10,
-        'batch_size': 128
+        'batch_size': 32
     }
 
     if not os.path.exists(config['model_dir']):
         os.makedirs(config['model_dir'])
 
-    with open(os.path.join(config['model_dir'], 'config.json'), 'w') as f:
-        json.dump(config, f, indent=4)
+    classifier = TextSafetyClassifier(config)
+    classifier.train()
 
-    trainer = TextSafetyTrainer(config)
-    history = trainer.train()
 
 if __name__ == "__main__":
     main()

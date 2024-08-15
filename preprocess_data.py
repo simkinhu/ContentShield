@@ -2,16 +2,15 @@ import os
 import numpy as np
 import pandas as pd
 from datetime import datetime
-from tensorflow.keras.preprocessing.text import Tokenizer
-from tensorflow.keras.preprocessing.sequence import pad_sequences
+from transformers import BertTokenizer
 from sklearn.model_selection import train_test_split
 import json
-
 
 class TextSafetyPreprocessor:
     def __init__(self, config):
         self.config = config
         self.labels_dict = self._load_labels_dict()
+        self.tokenizer = BertTokenizer.from_pretrained(self.config['bert_model_name'])
 
     @staticmethod
     def _load_labels_dict():
@@ -37,29 +36,40 @@ class TextSafetyPreprocessor:
         return texts, labels
 
     def preprocess_texts(self, texts):
-        tokenizer = Tokenizer(num_words=self.config['num_words'], oov_token="<OOV>")
-        tokenizer.fit_on_texts(texts)
-        sequences = tokenizer.texts_to_sequences(texts)
-        padded_sequences = pad_sequences(sequences, maxlen=self.config['max_len'], padding='post', truncating='post')
-        return padded_sequences, tokenizer
+        encoded_texts = self.tokenizer(
+            texts,
+            padding='max_length',
+            truncation=True,
+            max_length=self.config['max_len'],
+            return_tensors='np'
+        )
+        return encoded_texts
 
-    def save_preprocessed_data(self, data, labels, tokenizer):
+    def save_preprocessed_data(self, encoded_texts, labels):
         if not os.path.exists(self.config['output_dir']):
             os.makedirs(self.config['output_dir'])
 
         # Split data into train and test sets
-        X_train, X_test, y_train, y_test = train_test_split(data, labels, test_size=self.config['test_size'],
-                                                            random_state=42)
+        X_train, X_test, y_train, y_test = train_test_split(
+            list(zip(encoded_texts['input_ids'], encoded_texts['attention_mask'])),
+            labels,
+            test_size=self.config['test_size'],
+            random_state=42
+        )
 
-        np.save(os.path.join(self.config['output_dir'], 'X_train.npy'), X_train)
-        np.save(os.path.join(self.config['output_dir'], 'X_test.npy'), X_test)
-        np.save(os.path.join(self.config['output_dir'], 'y_train.npy'), y_train)
-        np.save(os.path.join(self.config['output_dir'], 'y_test.npy'), y_test)
+        # Unzip the tuples
+        X_train_input_ids, X_train_attention_mask = zip(*X_train)
+        X_test_input_ids, X_test_attention_mask = zip(*X_test)
 
-        # Save tokenizer
-        tokenizer_json = tokenizer.to_json()
-        with open(os.path.join(self.config['output_dir'], 'tokenizer.json'), 'w', encoding='utf-8') as f:
-            f.write(tokenizer_json)
+        # Save train data
+        np.save(os.path.join(self.config['output_dir'], 'X_train_input_ids.npy'), np.array(X_train_input_ids))
+        np.save(os.path.join(self.config['output_dir'], 'X_train_attention_mask.npy'), np.array(X_train_attention_mask))
+        np.save(os.path.join(self.config['output_dir'], 'y_train.npy'), np.array(y_train))
+
+        # Save test data
+        np.save(os.path.join(self.config['output_dir'], 'X_test_input_ids.npy'), np.array(X_test_input_ids))
+        np.save(os.path.join(self.config['output_dir'], 'X_test_attention_mask.npy'), np.array(X_test_attention_mask))
+        np.save(os.path.join(self.config['output_dir'], 'y_test.npy'), np.array(y_test))
 
         # Save labels dictionary
         with open(os.path.join(self.config['output_dir'], 'labels_dict.json'), 'w', encoding='utf-8') as f:
@@ -71,26 +81,24 @@ class TextSafetyPreprocessor:
         print(f"数据加载完成，共{len(texts)}条记录")
 
         print("开始预处理文本...")
-        padded_sequences, tokenizer = self.preprocess_texts(texts)
+        encoded_texts = self.preprocess_texts(texts)
         print("文本预处理完成")
 
         print("正在保存预处理后的数据...")
-        self.save_preprocessed_data(padded_sequences, labels, tokenizer)
+        self.save_preprocessed_data(encoded_texts, labels)
         print(f"预处理数据已保存到 {self.config['output_dir']}")
-
 
 def main():
     config = {
         'data_dir': 'data',
         'output_dir': os.path.join('preprocess', datetime.now().strftime("%Y%m%d")),
-        'num_words': 10000,
-        'max_len': 100,
+        'bert_model_name': 'bert-base-chinese',
+        'max_len': 128,
         'test_size': 0.2
     }
 
     preprocessor = TextSafetyPreprocessor(config)
     preprocessor.run()
-
 
 if __name__ == "__main__":
     main()
